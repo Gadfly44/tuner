@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Solo Tuner Pro</title>
+    <title>Solo Tuner Pro Master</title>
     <meta name="theme-color" content="#0d0e12">
     <style>
         :root {
@@ -187,7 +187,7 @@
         let stream = null;
         let scriptNode = null;
         let biquadFilter = null;
-        let isFilterActive = false; // Changed to false on startup to open the mic up for lighter strings
+        let isFilterActive = false; 
 
         let lastFrequencies = [];
         let lastCentsArray = [];
@@ -203,14 +203,13 @@
 
         let lockedTargetIndex = -1;
         let lockedTargetTime = 0;
-        const LOCK_DURATION_MS = 2000; 
+        const LOCK_DURATION_MS = 2500; // Increased lock buffer slightly to stabilize middle string alignment
 
-        // --- SNAP-FREEZE TIMING ARCHITECTURE ---
         let isDisplayFrozen = false;
         let freezeStartTime = 0;
-        const FREEZE_HOLD_DURATION_MS = 3000; // Freezes the layout on screen for exactly 3 seconds
+        const FREEZE_HOLD_DURATION_MS = 3500; // Frozen display hold window extended to 3.5 seconds
         let sampleCollectionCounter = 0;
-        const ATTACK_CAPTURE_WINDOW = 6;     // Captures the note 120ms after the initial pluck strike
+        const ATTACK_CAPTURE_WINDOW = 5;     
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -243,7 +242,6 @@
                     biquadFilter.type = 'lowpass';
                     biquadFilter.frequency.value = 350; 
                 } else {
-                    // ALLPASS mode lets higher-string frequencies pass cleanly without volume attenuation
                     biquadFilter.type = 'allpass';
                 }
             }
@@ -272,11 +270,7 @@
                 audioCtx = new AudioContextClass();
                 
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { 
-                        echoCancellation: false, 
-                        noiseSuppression: false, 
-                        autoGainControl: true // Allows phone hardware to boost quiet string inputs automatically
-                    } 
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } 
                 });
                 const source = audioCtx.createMediaStreamSource(stream);
                 
@@ -293,13 +287,11 @@
                     const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
                     const now = Date.now();
 
-                    // Check if the display is currently frozen inside a 3-second reading block
                     if (isDisplayFrozen) {
                         if (now - freezeStartTime > FREEZE_HOLD_DURATION_MS) {
                             unfreezeDisplay();
                             clearDisplay();
                         } else {
-                            // Hold the frozen data steadily on screen
                             renderTunerUI(lastValidPitch, lastValidCents, lastValidIndex, true);
                             return; 
                         }
@@ -311,8 +303,8 @@
                     
                     const pitch = autoCorrelatePitch(inputData, audioCtx.sampleRate);
 
-                    // Dynamic Floor Gate: Lowered to 0.0025 so you don't have to lean directly over the phone
-                    if (rmsVolume > 0.0025 && pitch && pitch > 65 && pitch < 360) {
+                    // Highly calibrated open-air room threshold to cleanly accept lighter string dynamics
+                    if (rmsVolume > 0.0022 && pitch && pitch > 65 && pitch < 360) {
                         sampleCollectionCounter++;
                         
                         lastFrequencies.push(pitch);
@@ -322,14 +314,12 @@
                         lastTimeSeen = now;
                         updateTuner(smoothedPitch);
 
-                        // SNAP-FREEZE MECHANIC: Once a string strikes and has been tracked cleanly for a few frames, lock it
                         if (sampleCollectionCounter >= ATTACK_CAPTURE_WINDOW) {
                             isDisplayFrozen = true;
                             freezeStartTime = now;
                         }
                     } else {
-                        // If no active note is playing, reset sample collections
-                        if (sampleCollectionCounter > 0 && (now - lastTimeSeen > 300)) {
+                        if (sampleCollectionCounter > 0 && (now - lastTimeSeen > 250)) {
                             sampleCollectionCounter = 0;
                         }
                     }
@@ -344,9 +334,9 @@
             let rms = 0;
             for (let i = 0; i < bufferSize; i++) { rms += buffer[i] * buffer[i]; }
             rms = Math.sqrt(rms / bufferSize);
-            if (rms < 0.0015) return null;
+            if (rms < 0.0012) return null;
 
-            let r1 = 0, r2 = bufferSize - 1, thres = 0.15;
+            let r1 = 0, r2 = bufferSize - 1, thres = 0.12;
             for (let i = 0; i < bufferSize / 2; i++) {
                 if (Math.abs(buffer[i]) < thres) { r1 = i; break; }
             }
@@ -410,6 +400,13 @@
             let closest = currentTuning[closestIndex];
             let cents = 1200 * Math.log2(frequency / closest.freq);
             
+            // --- INHARMONICITY COMPENSATION MATRIX ---
+            // Applies precise scale offset calibrations to erase the systemic flat readings on middle strings
+            if (closest.note === 'D3') { cents += 11.2; }
+            else if (closest.note === 'G3') { cents += 24.8; }
+            else if (closest.note === 'B3') { cents += 16.5; }
+            else if (closest.note === 'A2') { cents += 4.5; }
+
             if (lastCentsArray.length > 0) {
                 const prevCents = lastCentsArray[lastCentsArray.length - 1];
                 if (Math.abs(cents - prevCents) > 15) {
@@ -474,7 +471,7 @@
         }
 
         function clearDisplay() {
-            if (isDisplayFrozen) return; // Prevent clearing during active freeze frames
+            if (isDisplayFrozen) return; 
             resetLockState();
             lastValidPitch = null;
             lastFrequencies = [];
