@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solo Tuner Pro</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0d0e12">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <style>
+        :root {
+            --bg-main: #0d0e12;
+            --panel-bg: #161920;
+            --panel-border: #232836;
+            --text-main: #ffffff;
+            --text-muted: #6b7280;
+            --accent-in-tune: #00ff88;
+            --accent-sharp: #ff4757;
+            --accent-flat: #ffa502;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .app-container {
+            width: 100%;
+            max-width: 420px;
+            padding: 24px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+
+        .tuner-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 24px;
+            padding: 30px 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            position: relative;
+        }
+
+        .controls-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+            justify-content: center;
+        }
+
+        select, .btn-toggle {
+            background: #202430;
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+            padding: 10px 16px;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        select:focus, .btn-toggle:hover {
+            border-color: #3b82f6;
+        }
+
+        .btn-toggle.active {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: #3b82f6;
+            color: #60a5fa;
+        }
+
+        .status-graphic-container {
+            width: 140px;
+            height: 140px;
+            margin: 0 auto;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .status-ring {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            border: 4px dashed var(--text-muted);
+            box-sizing: border-box;
+            transition: all 0.2s ease;
+            transform: rotate(0deg);
+        }
+
+        .status-ring.tuning-sharp {
+            border-color: var(--accent-sharp);
+            transform: rotate(25deg);
+            box-shadow: 0 0 20px rgba(255, 71, 87, 0.2);
+        }
+
+        .status-ring.tuning-flat {
+            border-color: var(--accent-flat);
+            transform: rotate(-25deg);
+            box-shadow: 0 0 20px rgba(255, 165, 2, 0.2);
+        }
+
+        .status-ring.tuning-good {
+            border-color: var(--accent-in-tune);
+            border-style: solid;
+            box-shadow: 0 0 30px rgba(0, 255, 136, 0.4);
+        }
+
+        .note-wrapper {
+            position: relative;
+            margin: 15px 0;
+        }
+
+        .note-display {
+            font-size: 6.5rem;
+            font-weight: 900;
+            line-height: 1;
+            margin: 0;
+            letter-spacing: -2px;
+            transition: color 0.1s ease, text-shadow 0.2s ease;
+            z-index: 5;
+        }
+
+        .frequency-display {
+            font-family: monospace;
+            font-size: 1.3rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+
+        .meter-wrapper {
+            margin: 30px 0 20px 0;
+            position: relative;
+        }
+
+        .meter-track {
+            height: 8px;
+            background: #202430;
+            border-radius: 4px;
+            position: relative;
+        }
+
+        .center-line {
+            position: absolute;
+            left: 50%;
+            top: -8px;
+            width: 4px;
+            height: 24px;
+            background: var(--text-muted);
+            transform: translateX(-50%);
+            border-radius: 2px;
+            transition: background-color 0.2s ease;
+        }
+
+        .needle {
+            position: absolute;
+            top: -4px;
+            left: 50%;
+            width: 16px;
+            height: 16px;
+            background: var(--text-main);
+            border-radius: 50%;
+            transform: translateX(-50%);
+            box-shadow: 0 0 15px rgba(255,255,255,0.5);
+            transition: left 0.12s cubic-bezier(0.1, 0.8, 0.3, 1), background-color 0.15s ease, box-shadow 0.15s ease;
+        }
+        
+        .cents-indicator {
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            margin-top: 10px;
+        }
+
+        .hz-reference-panel {
+            background: #1c202b;
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            margin-top: 25px;
+            padding: 15px;
+        }
+
+        .reference-title {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+
+        .reference-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 6px;
+        }
+
+        .ref-item {
+            background: #11141a;
+            padding: 8px 4px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+        }
+
+        .ref-item.active-target {
+            background: rgba(59, 130, 246, 0.15);
+            border-color: #3b82f6;
+        }
+
+        .ref-note {
+            font-weight: 800;
+            font-size: 1rem;
+            color: var(--text-main);
+        }
+
+        .ref-hz {
+            font-family: monospace;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+            color: white;
+            border: none;
+            padding: 18px 45px;
+            font-size: 1.2rem;
+            font-weight: 700;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 10px 25px rgba(29, 78, 216, 0.4);
+            transition: transform 0.1s ease;
+        }
+
+        .btn-primary:active {
+            transform: scale(0.96);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="app-container">
+        <button id="startButton" class="btn-primary">Power On Tuner</button>
+        
+        <div id="tunerInterface" class="tuner-card hidden">
+            <div class="controls-row">
+                <select id="tuningPreset">
+                    <option value="standard">Standard Tuning</option>
+                    <option value="dropd">Drop D Tuning</option>
+                    <option value="dadgad">DADGAD Tuning</option>
+                </select>
+                <button id="filterToggle" class="btn-toggle">Filter Rumble</button>
+            </div>
+
+            <div class="status-graphic-container">
+                <div id="statusRing" class="status-ring"></div>
+                <div class="note-wrapper">
+                    <div id="note" class="note-display">-</div>
+                </div>
+            </div>
+
+            <div id="frequency" class="frequency-display">0.00 Hz</div>
+            
+            <div class="meter-wrapper">
+                <div class="meter-track">
+                    <div id="centerLine" class="center-line"></div>
+                    <div id="needle" class="needle"></div>
+                </div>
+                <div id="centsReadout" class="cents-indicator">--</div>
+            </div>
+
+            <div class="hz-reference-panel">
+                <div class="reference-title" id="presetLabel">Standard Targets</div>
+                <div class="reference-grid" id="referenceGrid"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const startButton = document.getElementById('startButton');
+        const tunerInterface = document.getElementById('tunerInterface');
+        const noteDisplay = document.getElementById('note');
+        const freqDisplay = document.getElementById('frequency');
+        const needle = document.getElementById('needle');
+        const centerLine = document.getElementById('centerLine');
+        const centsReadout = document.getElementById('centsReadout');
+        const tuningPreset = document.getElementById('tuningPreset');
+        const filterToggle = document.getElementById('filterToggle');
+        const statusRing = document.getElementById('statusRing');
+        const referenceGrid = document.getElementById('referenceGrid');
+        const presetLabel = document.getElementById('presetLabel');
+
+        const tunings = {
+            standard: [
+                { note: 'E2', freq: 82.41 }, { note: 'A2', freq: 110.00 }, { note: 'D3', freq: 146.83 },
+                { note: 'G3', freq: 196.00 }, { note: 'B3', freq: 246.94 }, { note: 'E4', freq: 329.63 }
+            ],
+            dropd: [
+                { note: 'D2', freq: 73.42 }, { note: 'A2', freq: 110.00 }, { note: 'D3', freq: 146.83 },
+                { note: 'G3', freq: 196.00 }, { note: 'B3', freq: 246.94 }, { note: 'E4', freq: 329.63 }
+            ],
+            dadgad: [
+                { note: 'D2', freq: 73.42 }, { note: 'A2', freq: 110.00 }, { note: 'D3', freq: 146.83 },
+                { note: 'G3', freq: 196.00 }, { note: 'A3', freq: 220.00 }, { note: 'D4', freq: 293.66 }
+            ]
+        };
+
+        let currentTuning = tunings.standard;
+        let audioCtx = null;
+        let stream = null;
+        let scriptNode = null;
+        let lowPassFilter = null;
+        let isFilterActive = false;
+        const bufferSize = 4048;
+
+        function buildReferenceUI() {
+            referenceGrid.innerHTML = '';
+            currentTuning.forEach(function(item, index) {
+                const div = document.createElement('div');
+                div.className = 'ref-item';
+                div.id = 'ref-string-' + index;
+                div.innerHTML = '<div class="ref-note">' + item.note + '</div><div class="ref-hz">' + item.freq.toFixed(1) + '</div>';
+                referenceGrid.appendChild(div);
+            });
+        }
+
+        tuningPreset.addEventListener('change', function(e) {
+            currentTuning = tunings[e.target.value];
+            presetLabel.innerText = e.target.options[e.target.selectedIndex].text + ' Targets';
+            buildReferenceUI();
+        });
+
+        filterToggle.addEventListener('click', function() {
+            isFilterActive = !isFilterActive;
+            filterToggle.classList.toggle('active', isFilterActive);
+            if (audioCtx && lowPassFilter) {
+                lowPassFilter.frequency.value = isFilterActive ? 50 : 10;
+            }
+        });
+
+        startButton.addEventListener('click', function() {
+            startButton.classList.add('hidden');
+            tunerInterface.classList.remove('hidden');
+            buildReferenceUI();
+            initAudio();
+        });
+
+        async function initAudio() {
+            try {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new AudioContextClass();
+                
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+                });
+                
+                const source = audioCtx.createMediaStreamSource(stream);
+                
+                lowPassFilter = audioCtx.createBiquadFilter();
+                lowPassFilter.type = 'highpass';
+                lowPassFilter.frequency.value = isFilterActive ? 50 : 10;
+
+                scriptNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+                
+                source.connect(lowPassFilter);
+                lowPassFilter.connect(scriptNode);
+                scriptNode.connect(audioCtx.destination);
+
+                scriptNode.onaudioprocess = function(audioProcessingEvent) {
+                    const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                    const pitch = yinPitchDetection(inputData, audioCtx.sampleRate);
+                    
+                    if (pitch && pitch > 50 && pitch < 400) {
+                        updateTuner(pitch);
+                    }
+                };
+            } catch (err) {
+                alert('Microphone setup failed. Ensure page uses HTTPS or Localhost: ' + err);
+            }
+        }
+
+        function yinPitchDetection(buffer, sampleRate) {
+            const halfBufferSize = Math.floor(buffer.length / 2);
+            const threshold = 0.15;
+            let yinBuffer = new Float32Array(halfBufferSize);
+
+            for (let tau = 0; tau < halfBufferSize; tau++) {
+                for (let i = 0; i < halfBufferSize; i++) {
+                    const delta = buffer[i] - buffer[i + tau];
+                    yinBuffer[tau] += delta * delta;
+                }
+            }
+
+            yinBuffer[0] = 1;
+            let runningSum = 0;
+            for (let tau = 1; tau < halfBufferSize; tau++) {
+                runningSum += yinBuffer[tau];
+                yinBuffer[tau] *= tau / (runningSum || 1);
+            }
+
+            let tauEstimate = -1;
+            for (let tau = 1; tau < halfBufferSize; tau++) {
+                if (yinBuffer[tau] < threshold) {
+                    while (tau + 1 < halfBufferSize && yinBuffer[tau + 1] < yinBuffer[tau]) {
+                        tau++;
+                    }
+                    tauEstimate = tau;
+                    break;
+                }
+            }
+
+            if (tauEstimate === -1) {
+                let minVal = Infinity;
+                for (let tau = 1; tau < halfBufferSize; tau++) {
+                    if (yinBuffer[tau] < minVal) {
+                        minVal = yinBuffer[tau];
+                        tauEstimate = tau;
+                    }
+                }
+            }
+
+            if (tauEstimate > 0) {
+                return sampleRate / tauEstimate;
+            }
+            return null;
+        }
+
+        function updateTuner(frequency) {
+            let closestIndex = 0;
+            let minDiff = Math.abs(frequency - currentTuning[0].freq);
+
+            for (let i = 1; i < currentTuning.length; i++) {
+                let diff = Math.abs(frequency - currentTuning[i].freq);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestIndex = i;
+                }
+            }
+
+            let closest = currentTuning[closestIndex];
+            const cents = 1200 * Math.log2(frequency / closest.freq);
+            const boundedCents = Math.max(-50, Math.min(50, cents));
+            const needlePosition = ((boundedCents + 50) / 100) * 100;
+
+            freqDisplay.innerText = frequency.toFixed(2) + ' Hz';
+            noteDisplay.innerText = closest.note.substring(0, 1);
+            needle.style.left = needlePosition + '%';
+
+            const items = document.querySelectorAll('.ref-item');
+            items.forEach(function(item) {
+                item.classList.remove('active-target');
+            });
+            
+            const activeBlock = document.getElementById('ref-string-' + closestIndex);
+            if (activeBlock) {
+                activeBlock.classList.add('active-target');
+            }
+
+            statusRing.className = 'status-ring';
+
+            if (Math.abs(cents) < 3) {
+                noteDisplay.style.color = 'var(--accent-in-tune)';
+                noteDisplay.style.textShadow = '0 0 30px rgba(0, 255, 136, 0.4)';
+                needle.style.backgroundColor = 'var(--accent-in-tune)';
+                needle.style.boxShadow = '0 0 20px var(--accent-in-tune)';
+                centerLine.style.backgroundColor = 'var(--accent-in-tune)';
+                centsReadout.innerText = 'IN TUNE';
+                centsReadout.style.color = 'var(--accent-in-tune)';
+                statusRing.classList.add('tuning-good');
+            } else {
+                const isSharp = cents > 0;
+                let activeColor = 'var(--accent-flat)';
+                if (isSharp) {
+                    activeColor = 'var(--accent-sharp)';
+                }
+                
+                noteDisplay.style.color = 'var(--text-main)';
+                noteDisplay.style.textShadow = 'none';
+                needle.style.backgroundColor = activeColor;
+                needle.style.boxShadow = '0 0 15px ' + activeColor;
+                centerLine.style.backgroundColor = 'var(--text-muted)';
+                centsReadout.innerText = (isSharp ? '+' : '') + Math.round(cents) + ' Cents';
+                centsReadout.style.color = activeColor;
+                
+                if (isSharp) {
+                    statusRing.classList.add('tuning-sharp');
+                } else {
+                    statusRing.classList.add('tuning-flat');
+                }
+            }
+        }
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js');
+        }
+    </script>
+</body>
+</html>
