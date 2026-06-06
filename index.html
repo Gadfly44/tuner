@@ -99,7 +99,9 @@
         .meter-wrapper { margin: 30px 0 20px 0; position: relative; }
         .meter-track { height: 8px; background: #202430; border-radius: 4px; position: relative; }
         .center-line { position: absolute; left: 50%; top: -8px; width: 4px; height: 24px; background: var(--text-muted); transform: translateX(-50%); }
-        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.3s cubic-bezier(0.25, 1, 0.5, 1), background-color 0.2s ease; }
+        
+        /* DAMPED NEEDLE FLUIDITY: Shifted to a hyper-smooth cubic transit model to simulate needle counter-weights */
+        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.35s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease; }
         .cents-indicator { font-size: 0.9rem; font-weight: 700; color: var(--text-muted); margin-top: 10px; }
 
         .hz-reference-panel { background: #1c202b; border: 1px solid var(--panel-border); border-radius: 16px; margin-top: 25px; padding: 15px; }
@@ -189,18 +191,24 @@
         let biquadFilter = null;
         let isFilterActive = true; 
 
+        // --- STABILIZER PARAMETERS ---
         let lastFrequencies = [];
         let lastCentsArray = [];
-        const SMOOTHING_FRAMES = 8;      
+        const SMOOTHING_FRAMES = 6;      
         
         let lastValidPitch = null;
         let lastValidCents = 0;
         let lastValidIndex = -1;
         let lastTimeSeen = 0;
-        const NOTE_SUSTAIN_MS = 1200;     
+        const NOTE_SUSTAIN_MS = 1400;     
         
         let lastVisualUpdateTime = 0;
-        const VISUAL_THROTTLE_MS = 150;   
+        const VISUAL_THROTTLE_MS = 130;   
+
+        // --- HYSTERESIS NOTE LOCK VARIABLES ---
+        let lockedTargetIndex = -1;
+        let lockedTargetTime = 0;
+        const LOCK_DURATION_MS = 1800; // Keeps focus locked on selected string target row
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -217,6 +225,7 @@
             currentTuning = tunings[e.target.value];
             presetLabel.innerText = e.target.options[e.target.selectedIndex].text + ' Targets';
             buildReferenceUI();
+            resetLockState();
         });
 
         filterToggle.addEventListener('click', function() {
@@ -228,13 +237,17 @@
         function setFilterCharacteristics() {
             if (audioCtx && biquadFilter) {
                 if (isFilterActive) {
-                    // LOW-E DEFENDER: Attenuates extreme upper harmonic spikes while passing the 70Hz - 350Hz range cleanly
                     biquadFilter.type = 'lowpass';
-                    biquadFilter.frequency.value = 380;
+                    biquadFilter.frequency.value = 340; // Tightened filter ceiling to trap overtones
                 } else {
                     biquadFilter.type = 'allpass';
                 }
             }
+        }
+
+        function resetLockState() {
+            lockedTargetIndex = -1;
+            lockedTargetTime = 0;
         }
 
         startButton.addEventListener('click', function() {
@@ -257,7 +270,6 @@
                 biquadFilter = audioCtx.createBiquadFilter();
                 setFilterCharacteristics();
                 
-                // Explicit buffer size set to a high performance value to prevent frame dropping
                 scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
                 
                 source.connect(biquadFilter);
@@ -273,11 +285,11 @@
                     }
                     const rmsVolume = Math.sqrt(sumSquares / inputData.length);
                     
-                    // High-accuracy structural autocorrelation algorithm
                     const pitch = autoCorrelatePitch(inputData, audioCtx.sampleRate);
                     const now = Date.now();
 
-                    if (rmsVolume > 0.003 && pitch && pitch > 65 && pitch < 350) {
+                    // Absolute Floor Gate: Raised slightly to strip away dying, fluttering string echo data
+                    if (rmsVolume > 0.005 && pitch && pitch > 60 && pitch < 360) {
                         lastFrequencies.push(pitch);
                         if (lastFrequencies.length > SMOOTHING_FRAMES) { lastFrequencies.shift(); }
                         const smoothedPitch = lastFrequencies.reduce((a, b) => a + b) / lastFrequencies.length;
@@ -297,18 +309,14 @@
             }
         }
 
-        // --- STABLE AUTOCORRELATION ENGINE WITH PARABOLIC INTERPOLATION ---
         function autoCorrelatePitch(buffer, sampleRate) {
             const bufferSize = buffer.length;
-            
-            // Step 1: Calculate structural signal root mean square validation
             let rms = 0;
             for (let i = 0; i < bufferSize; i++) { rms += buffer[i] * buffer[i]; }
             rms = Math.sqrt(rms / bufferSize);
             if (rms < 0.002) return null;
 
-            // Step 2: Trim quiet tail clipping metrics to isolate primary waves
-            let r1 = 0, r2 = bufferSize - 1, thres = 0.2;
+            let r1 = 0, r2 = bufferSize - 1, thres = 0.15;
             for (let i = 0; i < bufferSize / 2; i++) {
                 if (Math.abs(buffer[i]) < thres) { r1 = i; break; }
             }
@@ -318,7 +326,6 @@
             const trimmedBuffer = buffer.subarray(r1, r2);
             const trimmedSize = trimmedBuffer.length;
 
-            // Step 3: Run correlation calculations across valid musical ranges
             let correlationBuffer = new Float32Array(trimmedSize);
             for (let i = 0; i < trimmedSize; i++) {
                 for (let j = 0; j < trimmedSize - i; j++) {
@@ -326,11 +333,9 @@
                 }
             }
 
-            // Find the first major inflection drop below the peak center threshold
             let d = 0;
             while (correlationBuffer[d] > correlationBuffer[d + 1]) d++;
             
-            // Locate the maximum pattern match peak
             let maxVal = -1, maxLag = -1;
             for (let i = d; i < trimmedSize; i++) {
                 if (correlationBuffer[i] > maxVal) {
@@ -341,7 +346,6 @@
 
             let T0 = maxLag;
 
-            // Step 4: Parabolic Interpolation for sub-sample accuracy frequency extraction
             if (T0 > 0 && T0 < trimmedSize - 1) {
                 const alpha = correlationBuffer[T0 - 1];
                 const beta = correlationBuffer[T0];
@@ -350,22 +354,44 @@
                 T0 = T0 + p;
             }
 
-            const estimatedFrequency = sampleRate / T0;
-            return estimatedFrequency;
+            return sampleRate / T0;
         }
 
         function updateTuner(frequency) {
+            const now = Date.now();
             let closestIndex = 0;
-            let minDiff = Math.abs(frequency - currentTuning[0].freq);
 
-            for (let i = 1; i < currentTuning.length; i++) {
-                let diff = Math.abs(frequency - currentTuning[i].freq);
-                if (diff < minDiff) { minDiff = diff; closestIndex = i; }
+            // HYSTERESIS LOGIC: If a target string is already locked, force calculation against THAT row
+            if (lockedTargetIndex !== -1 && (now - lockedTargetTime < LOCK_DURATION_MS)) {
+                closestIndex = lockedTargetIndex;
+            } else {
+                // Otherwise, scan and find the closest string array match
+                let minDiff = Math.abs(frequency - currentTuning[0].freq);
+                for (let i = 1; i < currentTuning.length; i++) {
+                    let diff = Math.abs(frequency - currentTuning[i].freq);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        closestIndex = i;
+                    }
+                }
+                // Establish a fresh lock zone for this string
+                lockedTargetIndex = closestIndex;
             }
+            
+            // Refresh our lock expiration timestamp on active tracking
+            lockedTargetTime = now;
 
             let closest = currentTuning[closestIndex];
-            const cents = 1200 * Math.log2(frequency / closest.freq);
+            let cents = 1200 * Math.log2(frequency / closest.freq);
             
+            // SMOOTHING BALANCER: If cents value jumps violently (>15 cents) over single frame, filter the impact
+            if (lastCentsArray.length > 0) {
+                const prevCents = lastCentsArray[lastCentsArray.length - 1];
+                if (Math.abs(cents - prevCents) > 15) {
+                    cents = prevCents + (cents - prevCents) * 0.25; // Damps rapid snap actions
+                }
+            }
+
             lastCentsArray.push(cents);
             if (lastCentsArray.length > SMOOTHING_FRAMES) { lastCentsArray.shift(); }
             const smoothedCents = lastCentsArray.reduce((a, b) => a + b) / lastCentsArray.length;
@@ -379,7 +405,16 @@
 
         function renderTunerUI(frequency, cents, closestIndex, isSustaining) {
             let closest = currentTuning[closestIndex];
-            const boundedCents = Math.max(-50, Math.min(50, cents));
+            
+            // EXPONENTIAL SCALE COMPENSATION: Softens needle physics when very close to 0 center mark
+            const absCents = Math.abs(cents);
+            let displayCents = cents;
+            if (absCents < 8) {
+                // Math flattening curve prevents the +5/-5 text/needle jump effect
+                displayCents = cents * 0.6; 
+            }
+
+            const boundedCents = Math.max(-50, Math.min(50, displayCents));
             const needlePosition = ((boundedCents + 50) / 100) * 100;
             const now = Date.now();
 
@@ -418,6 +453,7 @@
         }
 
         function clearDisplay() {
+            resetLockState();
             lastValidPitch = null;
             lastFrequencies = [];
             lastCentsArray = [];
