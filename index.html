@@ -99,9 +99,7 @@
         .meter-wrapper { margin: 30px 0 20px 0; position: relative; }
         .meter-track { height: 8px; background: #202430; border-radius: 4px; position: relative; }
         .center-line { position: absolute; left: 50%; top: -8px; width: 4px; height: 24px; background: var(--text-muted); transform: translateX(-50%); }
-        
-        /* VISUAL FIX: Extended animation duration to 0.45s using a heavy smooth ease out curves to mimic inertia */
-        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.45s cubic-bezier(0.25, 1, 0.5, 1), background-color 0.2s ease; }
+        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.3s cubic-bezier(0.25, 1, 0.5, 1), background-color 0.2s ease; }
         .cents-indicator { font-size: 0.9rem; font-weight: 700; color: var(--text-muted); margin-top: 10px; }
 
         .hz-reference-panel { background: #1c202b; border: 1px solid var(--panel-border); border-radius: 16px; margin-top: 25px; padding: 15px; }
@@ -188,23 +186,21 @@
         let audioCtx = null;
         let stream = null;
         let scriptNode = null;
-        let lowPassFilter = null;
+        let biquadFilter = null;
         let isFilterActive = true; 
 
-        // --- STABILIZED AVERAGING ARRAYS ---
         let lastFrequencies = [];
         let lastCentsArray = [];
-        const SMOOTHING_FRAMES = 12;      // Aggressive damping grid to catch erratic acoustic drops
+        const SMOOTHING_FRAMES = 8;      
         
         let lastValidPitch = null;
         let lastValidCents = 0;
         let lastValidIndex = -1;
         let lastTimeSeen = 0;
-        const NOTE_SUSTAIN_MS = 1500;     // Extended display retention window to 1.5s
+        const NOTE_SUSTAIN_MS = 1200;     
         
-        // Human Frame Limiter timestamps
         let lastVisualUpdateTime = 0;
-        const VISUAL_THROTTLE_MS = 180;   // Restricts text redraw loops to 5.5 calculations per second
+        const VISUAL_THROTTLE_MS = 150;   
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -226,10 +222,20 @@
         filterToggle.addEventListener('click', function() {
             isFilterActive = !isFilterActive;
             filterToggle.classList.toggle('active', isFilterActive);
-            if (audioCtx && lowPassFilter) {
-                lowPassFilter.frequency.value = isFilterActive ? 50 : 10;
-            }
+            setFilterCharacteristics();
         });
+
+        function setFilterCharacteristics() {
+            if (audioCtx && biquadFilter) {
+                if (isFilterActive) {
+                    // LOW-E DEFENDER: Attenuates extreme upper harmonic spikes while passing the 70Hz - 350Hz range cleanly
+                    biquadFilter.type = 'lowpass';
+                    biquadFilter.frequency.value = 380;
+                } else {
+                    biquadFilter.type = 'allpass';
+                }
+            }
+        }
 
         startButton.addEventListener('click', function() {
             startButton.classList.add('hidden');
@@ -248,14 +254,14 @@
                 });
                 const source = audioCtx.createMediaStreamSource(stream);
                 
-                lowPassFilter = audioCtx.createBiquadFilter();
-                lowPassFilter.type = 'highpass';
-                lowPassFilter.frequency.value = isFilterActive ? 50 : 10;
+                biquadFilter = audioCtx.createBiquadFilter();
+                setFilterCharacteristics();
                 
-                scriptNode = audioCtx.createScriptProcessor(0, 1, 1);
+                // Explicit buffer size set to a high performance value to prevent frame dropping
+                scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
                 
-                source.connect(lowPassFilter);
-                lowPassFilter.connect(scriptNode);
+                source.connect(biquadFilter);
+                biquadFilter.connect(scriptNode);
                 scriptNode.connect(audioCtx.destination);
 
                 scriptNode.onaudioprocess = function(audioProcessingEvent) {
@@ -267,11 +273,11 @@
                     }
                     const rmsVolume = Math.sqrt(sumSquares / inputData.length);
                     
-                    const pitch = yinPitchDetection(inputData, audioCtx.sampleRate);
+                    // High-accuracy structural autocorrelation algorithm
+                    const pitch = autoCorrelatePitch(inputData, audioCtx.sampleRate);
                     const now = Date.now();
 
-                    if (rmsVolume > 0.003 && pitch && pitch > 65 && pitch < 380) {
-                        
+                    if (rmsVolume > 0.003 && pitch && pitch > 65 && pitch < 350) {
                         lastFrequencies.push(pitch);
                         if (lastFrequencies.length > SMOOTHING_FRAMES) { lastFrequencies.shift(); }
                         const smoothedPitch = lastFrequencies.reduce((a, b) => a + b) / lastFrequencies.length;
@@ -291,39 +297,61 @@
             }
         }
 
-        function yinPitchDetection(buffer, sampleRate) {
-            const halfBufferSize = Math.floor(buffer.length / 2);
-            const threshold = 0.10; 
-            let yinBuffer = new Float32Array(halfBufferSize);
+        // --- STABLE AUTOCORRELATION ENGINE WITH PARABOLIC INTERPOLATION ---
+        function autoCorrelatePitch(buffer, sampleRate) {
+            const bufferSize = buffer.length;
+            
+            // Step 1: Calculate structural signal root mean square validation
+            let rms = 0;
+            for (let i = 0; i < bufferSize; i++) { rms += buffer[i] * buffer[i]; }
+            rms = Math.sqrt(rms / bufferSize);
+            if (rms < 0.002) return null;
 
-            for (let tau = 0; tau < halfBufferSize; tau++) {
-                for (let i = 0; i < halfBufferSize; i++) {
-                    const delta = buffer[i] - buffer[i + tau];
-                    yinBuffer[tau] += delta * delta;
+            // Step 2: Trim quiet tail clipping metrics to isolate primary waves
+            let r1 = 0, r2 = bufferSize - 1, thres = 0.2;
+            for (let i = 0; i < bufferSize / 2; i++) {
+                if (Math.abs(buffer[i]) < thres) { r1 = i; break; }
+            }
+            for (let i = bufferSize - 1; i >= bufferSize / 2; i--) {
+                if (Math.abs(buffer[i]) < thres) { r2 = i; break; }
+            }
+            const trimmedBuffer = buffer.subarray(r1, r2);
+            const trimmedSize = trimmedBuffer.length;
+
+            // Step 3: Run correlation calculations across valid musical ranges
+            let correlationBuffer = new Float32Array(trimmedSize);
+            for (let i = 0; i < trimmedSize; i++) {
+                for (let j = 0; j < trimmedSize - i; j++) {
+                    correlationBuffer[i] += trimmedBuffer[j] * trimmedBuffer[j + i];
                 }
             }
-            yinBuffer[0] = 1;
-            let runningSum = 0;
-            for (let tau = 1; tau < halfBufferSize; tau++) {
-                runningSum += yinBuffer[tau];
-                yinBuffer[tau] *= tau / (runningSum || 1);
-            }
-            let tauEstimate = -1;
-            for (let tau = 1; tau < halfBufferSize; tau++) {
-                if (yinBuffer[tau] < threshold) {
-                    while (tau + 1 < halfBufferSize && yinBuffer[tau + 1] < yinBuffer[tau]) { tau++; }
-                    tauEstimate = tau;
-                    break;
+
+            // Find the first major inflection drop below the peak center threshold
+            let d = 0;
+            while (correlationBuffer[d] > correlationBuffer[d + 1]) d++;
+            
+            // Locate the maximum pattern match peak
+            let maxVal = -1, maxLag = -1;
+            for (let i = d; i < trimmedSize; i++) {
+                if (correlationBuffer[i] > maxVal) {
+                    maxVal = correlationBuffer[i];
+                    maxLag = i;
                 }
             }
-            if (tauEstimate === -1) {
-                let minVal = Infinity;
-                for (let tau = 1; tau < halfBufferSize; tau++) {
-                    if (yinBuffer[tau] < minVal) { minVal = yinBuffer[tau]; tauEstimate = tau; }
-                }
+
+            let T0 = maxLag;
+
+            // Step 4: Parabolic Interpolation for sub-sample accuracy frequency extraction
+            if (T0 > 0 && T0 < trimmedSize - 1) {
+                const alpha = correlationBuffer[T0 - 1];
+                const beta = correlationBuffer[T0];
+                const gamma = correlationBuffer[T0 + 1];
+                const p = 0.5 * (alpha - gamma) / (alpha - 2 * beta + gamma);
+                T0 = T0 + p;
             }
-            if (tauEstimate > 0) { return sampleRate / tauEstimate; }
-            return null;
+
+            const estimatedFrequency = sampleRate / T0;
+            return estimatedFrequency;
         }
 
         function updateTuner(frequency) {
@@ -338,7 +366,6 @@
             let closest = currentTuning[closestIndex];
             const cents = 1200 * Math.log2(frequency / closest.freq);
             
-            // Apply a secondary math-buffer to the cents readout arrays
             lastCentsArray.push(cents);
             if (lastCentsArray.length > SMOOTHING_FRAMES) { lastCentsArray.shift(); }
             const smoothedCents = lastCentsArray.reduce((a, b) => a + b) / lastCentsArray.length;
@@ -356,12 +383,11 @@
             const needlePosition = ((boundedCents + 50) / 100) * 100;
             const now = Date.now();
 
-            // The Visual Throttle: Only update textual metrics if enough time has passed
             if (now - lastVisualUpdateTime > VISUAL_THROTTLE_MS || isSustaining) {
                 freqDisplay.innerText = frequency.toFixed(2) + ' Hz';
                 noteDisplay.innerText = closest.note.substring(0, 1);
                 
-                if (Math.abs(cents) < 3) {
+                if (Math.abs(cents) < 2.5) {
                     centsReadout.innerText = 'IN TUNE';
                     centsReadout.style.color = 'var(--accent-in-tune)';
                 } else {
@@ -372,7 +398,6 @@
                 lastVisualUpdateTime = now;
             }
 
-            // The needle always updates for real-time physics tracking, but its movement is damped by CSS transitions
             needle.style.left = needlePosition + '%';
 
             document.querySelectorAll('.ref-item').forEach(function(item) { item.classList.remove('active-target'); });
@@ -380,7 +405,7 @@
             if (activeBlock) { activeBlock.classList.add('active-target'); }
 
             statusRing.className = 'status-ring';
-            if (Math.abs(cents) < 3) {
+            if (Math.abs(cents) < 2.5) {
                 noteDisplay.style.color = 'var(--accent-in-tune)';
                 needle.style.backgroundColor = 'var(--accent-in-tune)';
                 statusRing.classList.add('tuning-good');
