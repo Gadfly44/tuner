@@ -99,7 +99,9 @@
         .meter-wrapper { margin: 30px 0 20px 0; position: relative; }
         .meter-track { height: 8px; background: #202430; border-radius: 4px; position: relative; }
         .center-line { position: absolute; left: 50%; top: -8px; width: 4px; height: 24px; background: var(--text-muted); transform: translateX(-50%); }
-        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.2s cubic-bezier(0.1, 0.8, 0.3, 1), background-color 0.15s ease; }
+        
+        /* VISUAL FIX: Extended animation duration to 0.45s using a heavy smooth ease out curves to mimic inertia */
+        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.45s cubic-bezier(0.25, 1, 0.5, 1), background-color 0.2s ease; }
         .cents-indicator { font-size: 0.9rem; font-weight: 700; color: var(--text-muted); margin-top: 10px; }
 
         .hz-reference-panel { background: #1c202b; border: 1px solid var(--panel-border); border-radius: 16px; margin-top: 25px; padding: 15px; }
@@ -189,14 +191,20 @@
         let lowPassFilter = null;
         let isFilterActive = true; 
 
-        // --- SMOOTHING AND PEAK HOLD RE-ENGINEERING SYSTEM ---
+        // --- STABILIZED AVERAGING ARRAYS ---
         let lastFrequencies = [];
-        const SMOOTHING_FRAMES = 5;      // Smooths out sporadic needle jumps
+        let lastCentsArray = [];
+        const SMOOTHING_FRAMES = 12;      // Aggressive damping grid to catch erratic acoustic drops
+        
         let lastValidPitch = null;
         let lastValidCents = 0;
         let lastValidIndex = -1;
         let lastTimeSeen = 0;
-        const NOTE_SUSTAIN_MS = 1200;    // Holds the note on UI for 1.2s so it doesn't flicker
+        const NOTE_SUSTAIN_MS = 1500;     // Extended display retention window to 1.5s
+        
+        // Human Frame Limiter timestamps
+        let lastVisualUpdateTime = 0;
+        const VISUAL_THROTTLE_MS = 180;   // Restricts text redraw loops to 5.5 calculations per second
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -262,25 +270,19 @@
                     const pitch = yinPitchDetection(inputData, audioCtx.sampleRate);
                     const now = Date.now();
 
-                    // Happy Medium Threshold: Lowered to 0.004 to capture quiet acoustic vibrations of an electric string
-                    if (rmsVolume > 0.004 && pitch && pitch > 65 && pitch < 380) {
+                    if (rmsVolume > 0.003 && pitch && pitch > 65 && pitch < 380) {
                         
-                        // Apply frequency rolling average smoothing
                         lastFrequencies.push(pitch);
-                        if (lastFrequencies.length > SMOOTHING_FRAMES) {
-                            lastFrequencies.shift();
-                        }
+                        if (lastFrequencies.length > SMOOTHING_FRAMES) { lastFrequencies.shift(); }
                         const smoothedPitch = lastFrequencies.reduce((a, b) => a + b) / lastFrequencies.length;
                         
                         lastTimeSeen = now;
                         updateTuner(smoothedPitch);
                     } else {
-                        // If string decays, check if we are within the Sustain Window to hold UI steady
                         if (now - lastTimeSeen > NOTE_SUSTAIN_MS) {
                             clearDisplay();
                         } else if (lastValidPitch !== null) {
-                            // Maintain the display seamlessly without jumping back to center
-                            renderTunerUI(lastValidPitch, lastValidCents, lastValidIndex);
+                            renderTunerUI(lastValidPitch, lastValidCents, lastValidIndex, true);
                         }
                     }
                 };
@@ -336,21 +338,41 @@
             let closest = currentTuning[closestIndex];
             const cents = 1200 * Math.log2(frequency / closest.freq);
             
-            // Cache current valid values for the sustain window engine
+            // Apply a secondary math-buffer to the cents readout arrays
+            lastCentsArray.push(cents);
+            if (lastCentsArray.length > SMOOTHING_FRAMES) { lastCentsArray.shift(); }
+            const smoothedCents = lastCentsArray.reduce((a, b) => a + b) / lastCentsArray.length;
+
             lastValidPitch = frequency;
-            lastValidCents = cents;
+            lastValidCents = smoothedCents;
             lastValidIndex = closestIndex;
 
-            renderTunerUI(frequency, cents, closestIndex);
+            renderTunerUI(frequency, smoothedCents, closestIndex, false);
         }
 
-        function renderTunerUI(frequency, cents, closestIndex) {
+        function renderTunerUI(frequency, cents, closestIndex, isSustaining) {
             let closest = currentTuning[closestIndex];
             const boundedCents = Math.max(-50, Math.min(50, cents));
             const needlePosition = ((boundedCents + 50) / 100) * 100;
+            const now = Date.now();
 
-            freqDisplay.innerText = frequency.toFixed(2) + ' Hz';
-            noteDisplay.innerText = closest.note.substring(0, 1);
+            // The Visual Throttle: Only update textual metrics if enough time has passed
+            if (now - lastVisualUpdateTime > VISUAL_THROTTLE_MS || isSustaining) {
+                freqDisplay.innerText = frequency.toFixed(2) + ' Hz';
+                noteDisplay.innerText = closest.note.substring(0, 1);
+                
+                if (Math.abs(cents) < 3) {
+                    centsReadout.innerText = 'IN TUNE';
+                    centsReadout.style.color = 'var(--accent-in-tune)';
+                } else {
+                    const isSharp = cents > 0;
+                    centsReadout.innerText = (isSharp ? '+' : '') + Math.round(cents) + ' Cents';
+                    centsReadout.style.color = isSharp ? 'var(--accent-sharp)' : 'var(--accent-flat)';
+                }
+                lastVisualUpdateTime = now;
+            }
+
+            // The needle always updates for real-time physics tracking, but its movement is damped by CSS transitions
             needle.style.left = needlePosition + '%';
 
             document.querySelectorAll('.ref-item').forEach(function(item) { item.classList.remove('active-target'); });
@@ -358,20 +380,14 @@
             if (activeBlock) { activeBlock.classList.add('active-target'); }
 
             statusRing.className = 'status-ring';
-
             if (Math.abs(cents) < 3) {
                 noteDisplay.style.color = 'var(--accent-in-tune)';
                 needle.style.backgroundColor = 'var(--accent-in-tune)';
-                centsReadout.innerText = 'IN TUNE';
-                centsReadout.style.color = 'var(--accent-in-tune)';
                 statusRing.classList.add('tuning-good');
             } else {
                 const isSharp = cents > 0;
-                let activeColor = isSharp ? 'var(--accent-sharp)' : 'var(--accent-flat)';
                 noteDisplay.style.color = 'var(--text-main)';
-                needle.style.backgroundColor = activeColor;
-                centsReadout.innerText = (isSharp ? '+' : '') + Math.round(cents) + ' Cents';
-                centsReadout.style.color = activeColor;
+                needle.style.backgroundColor = isSharp ? 'var(--accent-sharp)' : 'var(--accent-flat)';
                 statusRing.classList.add(isSharp ? 'tuning-sharp' : 'tuning-flat');
             }
         }
@@ -379,6 +395,7 @@
         function clearDisplay() {
             lastValidPitch = null;
             lastFrequencies = [];
+            lastCentsArray = [];
             noteDisplay.innerText = "-";
             noteDisplay.style.color = "var(--text-main)";
             freqDisplay.innerText = "0.00 Hz";
