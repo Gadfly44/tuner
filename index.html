@@ -88,18 +88,18 @@
             transition: all 0.2s ease;
         }
 
-        .status-ring.tuning-sharp { border-color: var(--accent-sharp); transform: rotate(25deg); }
-        .status-ring.tuning-flat { border-color: var(--accent-flat); transform: rotate(-25deg); }
+        .status-ring.tuning-sharp { border-color: var(--accent-sharp); transform: rotate(15deg); }
+        .status-ring.tuning-flat { border-color: var(--accent-flat); transform: rotate(-15deg); }
         .status-ring.tuning-good { border-color: var(--accent-in-tune); border-style: solid; box-shadow: 0 0 30px rgba(0, 255, 136, 0.4); }
 
         .note-wrapper { position: relative; margin: 15px 0; }
-        .note-display { font-size: 6.5rem; font-weight: 900; line-height: 1; margin: 0; letter-spacing: -2px; transition: color 0.1s ease; }
+        .note-display { font-size: 6.5rem; font-weight: 900; line-height: 1; margin: 0; letter-spacing: -2px; transition: color 0.15s ease; }
         .frequency-display { font-family: monospace; font-size: 1.3rem; color: var(--text-muted); margin-top: 5px; }
 
         .meter-wrapper { margin: 30px 0 20px 0; position: relative; }
         .meter-track { height: 8px; background: #202430; border-radius: 4px; position: relative; }
         .center-line { position: absolute; left: 50%; top: -8px; width: 4px; height: 24px; background: var(--text-muted); transform: translateX(-50%); }
-        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.1s ease-out, background-color 0.1s ease; }
+        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.2s cubic-bezier(0.1, 0.8, 0.3, 1), background-color 0.15s ease; }
         .cents-indicator { font-size: 0.9rem; font-weight: 700; color: var(--text-muted); margin-top: 10px; }
 
         .hz-reference-panel { background: #1c202b; border: 1px solid var(--panel-border); border-radius: 16px; margin-top: 25px; padding: 15px; }
@@ -187,7 +187,16 @@
         let stream = null;
         let scriptNode = null;
         let lowPassFilter = null;
-        let isFilterActive = true;
+        let isFilterActive = true; 
+
+        // --- SMOOTHING AND PEAK HOLD RE-ENGINEERING SYSTEM ---
+        let lastFrequencies = [];
+        const SMOOTHING_FRAMES = 5;      // Smooths out sporadic needle jumps
+        let lastValidPitch = null;
+        let lastValidCents = 0;
+        let lastValidIndex = -1;
+        let lastTimeSeen = 0;
+        const NOTE_SUSTAIN_MS = 1200;    // Holds the note on UI for 1.2s so it doesn't flicker
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -221,17 +230,13 @@
             initAudio();
         });
 
-       async function initAudio() {
+        async function initAudio() {
             try {
                 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new AudioContextClass();
                 
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { 
-                        echoCancellation: false, 
-                        noiseSuppression: false, 
-                        autoGainControl: false 
-                    } 
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } 
                 });
                 const source = audioCtx.createMediaStreamSource(stream);
                 
@@ -248,25 +253,35 @@
                 scriptNode.onaudioprocess = function(audioProcessingEvent) {
                     const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
                     
-                    // --- THE VOLUME GATE CALCULATOR ---
                     let sumSquares = 0;
                     for (let i = 0; i < inputData.length; i++) {
                         sumSquares += inputData[i] * inputData[i];
                     }
                     const rmsVolume = Math.sqrt(sumSquares / inputData.length);
                     
-                    // If the sound is quieter than a real guitar pluck, kill the process immediately
-                    // This keeps the screen perfectly dead-silent when you aren't playing
-                    if (rmsVolume < 0.015) {
-                        clearDisplay();
-                        return;
-                    }
-                    
                     const pitch = yinPitchDetection(inputData, audioCtx.sampleRate);
-                    if (pitch && pitch > 65 && pitch < 380) { 
-                        updateTuner(pitch); 
+                    const now = Date.now();
+
+                    // Happy Medium Threshold: Lowered to 0.004 to capture quiet acoustic vibrations of an electric string
+                    if (rmsVolume > 0.004 && pitch && pitch > 65 && pitch < 380) {
+                        
+                        // Apply frequency rolling average smoothing
+                        lastFrequencies.push(pitch);
+                        if (lastFrequencies.length > SMOOTHING_FRAMES) {
+                            lastFrequencies.shift();
+                        }
+                        const smoothedPitch = lastFrequencies.reduce((a, b) => a + b) / lastFrequencies.length;
+                        
+                        lastTimeSeen = now;
+                        updateTuner(smoothedPitch);
                     } else {
-                        clearDisplay();
+                        // If string decays, check if we are within the Sustain Window to hold UI steady
+                        if (now - lastTimeSeen > NOTE_SUSTAIN_MS) {
+                            clearDisplay();
+                        } else if (lastValidPitch !== null) {
+                            // Maintain the display seamlessly without jumping back to center
+                            renderTunerUI(lastValidPitch, lastValidCents, lastValidIndex);
+                        }
                     }
                 };
             } catch (err) {
@@ -274,22 +289,10 @@
             }
         }
 
-        // Quick helper to clear out the screen values cleanly when silent
-        function clearDisplay() {
-            noteDisplay.innerText = "-";
-            noteDisplay.style.color = "var(--text-main)";
-            freqDisplay.innerText = "0.00 Hz";
-            needle.style.left = "50%";
-            needle.style.backgroundColor = "var(--text-main)";
-            centsReadout.innerText = "--";
-            centsReadout.style.color = "var(--text-muted)";
-            statusRing.className = 'status-ring';
-        }
-
         function yinPitchDetection(buffer, sampleRate) {
-    const halfBufferSize = Math.floor(buffer.length / 2);
-    const threshold = 0.05; // <--- Set to 0.05 to reject background hum
-    let yinBuffer = new Float32Array(halfBufferSize);
+            const halfBufferSize = Math.floor(buffer.length / 2);
+            const threshold = 0.10; 
+            let yinBuffer = new Float32Array(halfBufferSize);
 
             for (let tau = 0; tau < halfBufferSize; tau++) {
                 for (let i = 0; i < halfBufferSize; i++) {
@@ -322,16 +325,6 @@
         }
 
         function updateTuner(frequency) {
-            // Noise Gate: Ignore background hum frequencies completely
-            if (frequency < 65 || frequency > 350) {
-                noteDisplay.innerText = "-";
-                freqDisplay.innerText = "0.00 Hz";
-                needle.style.left = "50%";
-                centsReadout.innerText = "--";
-                statusRing.className = 'status-ring';
-                return;
-            }
-
             let closestIndex = 0;
             let minDiff = Math.abs(frequency - currentTuning[0].freq);
 
@@ -342,6 +335,17 @@
 
             let closest = currentTuning[closestIndex];
             const cents = 1200 * Math.log2(frequency / closest.freq);
+            
+            // Cache current valid values for the sustain window engine
+            lastValidPitch = frequency;
+            lastValidCents = cents;
+            lastValidIndex = closestIndex;
+
+            renderTunerUI(frequency, cents, closestIndex);
+        }
+
+        function renderTunerUI(frequency, cents, closestIndex) {
+            let closest = currentTuning[closestIndex];
             const boundedCents = Math.max(-50, Math.min(50, cents));
             const needlePosition = ((boundedCents + 50) / 100) * 100;
 
@@ -370,6 +374,19 @@
                 centsReadout.style.color = activeColor;
                 statusRing.classList.add(isSharp ? 'tuning-sharp' : 'tuning-flat');
             }
+        }
+
+        function clearDisplay() {
+            lastValidPitch = null;
+            lastFrequencies = [];
+            noteDisplay.innerText = "-";
+            noteDisplay.style.color = "var(--text-main)";
+            freqDisplay.innerText = "0.00 Hz";
+            needle.style.left = "50%";
+            needle.style.backgroundColor = "var(--text-main)";
+            centsReadout.innerText = "--";
+            centsReadout.style.color = "var(--text-muted)";
+            statusRing.className = 'status-ring';
         }
     </script>
 </body>
