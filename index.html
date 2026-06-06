@@ -99,9 +99,7 @@
         .meter-wrapper { margin: 30px 0 20px 0; position: relative; }
         .meter-track { height: 8px; background: #202430; border-radius: 4px; position: relative; }
         .center-line { position: absolute; left: 50%; top: -8px; width: 4px; height: 24px; background: var(--text-muted); transform: translateX(-50%); }
-        
-        /* DAMPED NEEDLE FLUIDITY: Shifted to a hyper-smooth cubic transit model to simulate needle counter-weights */
-        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.35s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease; }
+        .needle { position: absolute; top: -4px; left: 50%; width: 16px; height: 16px; background: var(--text-main); border-radius: 50%; transform: translateX(-50%); transition: left 0.25s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease; }
         .cents-indicator { font-size: 0.9rem; font-weight: 700; color: var(--text-muted); margin-top: 10px; }
 
         .hz-reference-panel { background: #1c202b; border: 1px solid var(--panel-border); border-radius: 16px; margin-top: 25px; padding: 15px; }
@@ -189,26 +187,30 @@
         let stream = null;
         let scriptNode = null;
         let biquadFilter = null;
-        let isFilterActive = true; 
+        let isFilterActive = false; // Changed to false on startup to open the mic up for lighter strings
 
-        // --- STABILIZER PARAMETERS ---
         let lastFrequencies = [];
         let lastCentsArray = [];
-        const SMOOTHING_FRAMES = 6;      
+        const SMOOTHING_FRAMES = 4;      
         
         let lastValidPitch = null;
         let lastValidCents = 0;
         let lastValidIndex = -1;
         let lastTimeSeen = 0;
-        const NOTE_SUSTAIN_MS = 1400;     
         
         let lastVisualUpdateTime = 0;
-        const VISUAL_THROTTLE_MS = 130;   
+        const VISUAL_THROTTLE_MS = 120;   
 
-        // --- HYSTERESIS NOTE LOCK VARIABLES ---
         let lockedTargetIndex = -1;
         let lockedTargetTime = 0;
-        const LOCK_DURATION_MS = 1800; // Keeps focus locked on selected string target row
+        const LOCK_DURATION_MS = 2000; 
+
+        // --- SNAP-FREEZE TIMING ARCHITECTURE ---
+        let isDisplayFrozen = false;
+        let freezeStartTime = 0;
+        const FREEZE_HOLD_DURATION_MS = 3000; // Freezes the layout on screen for exactly 3 seconds
+        let sampleCollectionCounter = 0;
+        const ATTACK_CAPTURE_WINDOW = 6;     // Captures the note 120ms after the initial pluck strike
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -226,6 +228,7 @@
             presetLabel.innerText = e.target.options[e.target.selectedIndex].text + ' Targets';
             buildReferenceUI();
             resetLockState();
+            unfreezeDisplay();
         });
 
         filterToggle.addEventListener('click', function() {
@@ -238,8 +241,9 @@
             if (audioCtx && biquadFilter) {
                 if (isFilterActive) {
                     biquadFilter.type = 'lowpass';
-                    biquadFilter.frequency.value = 340; // Tightened filter ceiling to trap overtones
+                    biquadFilter.frequency.value = 350; 
                 } else {
+                    // ALLPASS mode lets higher-string frequencies pass cleanly without volume attenuation
                     biquadFilter.type = 'allpass';
                 }
             }
@@ -248,6 +252,11 @@
         function resetLockState() {
             lockedTargetIndex = -1;
             lockedTargetTime = 0;
+        }
+
+        function unfreezeDisplay() {
+            isDisplayFrozen = false;
+            sampleCollectionCounter = 0;
         }
 
         startButton.addEventListener('click', function() {
@@ -263,7 +272,11 @@
                 audioCtx = new AudioContextClass();
                 
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } 
+                    audio: { 
+                        echoCancellation: false, 
+                        noiseSuppression: false, 
+                        autoGainControl: true // Allows phone hardware to boost quiet string inputs automatically
+                    } 
                 });
                 const source = audioCtx.createMediaStreamSource(stream);
                 
@@ -278,29 +291,46 @@
 
                 scriptNode.onaudioprocess = function(audioProcessingEvent) {
                     const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-                    
-                    let sumSquares = 0;
-                    for (let i = 0; i < inputData.length; i++) {
-                        sumSquares += inputData[i] * inputData[i];
+                    const now = Date.now();
+
+                    // Check if the display is currently frozen inside a 3-second reading block
+                    if (isDisplayFrozen) {
+                        if (now - freezeStartTime > FREEZE_HOLD_DURATION_MS) {
+                            unfreezeDisplay();
+                            clearDisplay();
+                        } else {
+                            // Hold the frozen data steadily on screen
+                            renderTunerUI(lastValidPitch, lastValidCents, lastValidIndex, true);
+                            return; 
+                        }
                     }
+
+                    let sumSquares = 0;
+                    for (let i = 0; i < inputData.length; i++) { sumSquares += inputData[i] * inputData[i]; }
                     const rmsVolume = Math.sqrt(sumSquares / inputData.length);
                     
                     const pitch = autoCorrelatePitch(inputData, audioCtx.sampleRate);
-                    const now = Date.now();
 
-                    // Absolute Floor Gate: Raised slightly to strip away dying, fluttering string echo data
-                    if (rmsVolume > 0.005 && pitch && pitch > 60 && pitch < 360) {
+                    // Dynamic Floor Gate: Lowered to 0.0025 so you don't have to lean directly over the phone
+                    if (rmsVolume > 0.0025 && pitch && pitch > 65 && pitch < 360) {
+                        sampleCollectionCounter++;
+                        
                         lastFrequencies.push(pitch);
                         if (lastFrequencies.length > SMOOTHING_FRAMES) { lastFrequencies.shift(); }
                         const smoothedPitch = lastFrequencies.reduce((a, b) => a + b) / lastFrequencies.length;
                         
                         lastTimeSeen = now;
                         updateTuner(smoothedPitch);
+
+                        // SNAP-FREEZE MECHANIC: Once a string strikes and has been tracked cleanly for a few frames, lock it
+                        if (sampleCollectionCounter >= ATTACK_CAPTURE_WINDOW) {
+                            isDisplayFrozen = true;
+                            freezeStartTime = now;
+                        }
                     } else {
-                        if (now - lastTimeSeen > NOTE_SUSTAIN_MS) {
-                            clearDisplay();
-                        } else if (lastValidPitch !== null) {
-                            renderTunerUI(lastValidPitch, lastValidCents, lastValidIndex, true);
+                        // If no active note is playing, reset sample collections
+                        if (sampleCollectionCounter > 0 && (now - lastTimeSeen > 300)) {
+                            sampleCollectionCounter = 0;
                         }
                     }
                 };
@@ -314,7 +344,7 @@
             let rms = 0;
             for (let i = 0; i < bufferSize; i++) { rms += buffer[i] * buffer[i]; }
             rms = Math.sqrt(rms / bufferSize);
-            if (rms < 0.002) return null;
+            if (rms < 0.0015) return null;
 
             let r1 = 0, r2 = bufferSize - 1, thres = 0.15;
             for (let i = 0; i < bufferSize / 2; i++) {
@@ -325,6 +355,7 @@
             }
             const trimmedBuffer = buffer.subarray(r1, r2);
             const trimmedSize = trimmedBuffer.length;
+            if (trimmedSize < 64) return null;
 
             let correlationBuffer = new Float32Array(trimmedSize);
             for (let i = 0; i < trimmedSize; i++) {
@@ -334,7 +365,7 @@
             }
 
             let d = 0;
-            while (correlationBuffer[d] > correlationBuffer[d + 1]) d++;
+            while (d < trimmedSize - 1 && correlationBuffer[d] > correlationBuffer[d + 1]) d++;
             
             let maxVal = -1, maxLag = -1;
             for (let i = d; i < trimmedSize; i++) {
@@ -345,7 +376,6 @@
             }
 
             let T0 = maxLag;
-
             if (T0 > 0 && T0 < trimmedSize - 1) {
                 const alpha = correlationBuffer[T0 - 1];
                 const beta = correlationBuffer[T0];
@@ -361,11 +391,9 @@
             const now = Date.now();
             let closestIndex = 0;
 
-            // HYSTERESIS LOGIC: If a target string is already locked, force calculation against THAT row
             if (lockedTargetIndex !== -1 && (now - lockedTargetTime < LOCK_DURATION_MS)) {
                 closestIndex = lockedTargetIndex;
             } else {
-                // Otherwise, scan and find the closest string array match
                 let minDiff = Math.abs(frequency - currentTuning[0].freq);
                 for (let i = 1; i < currentTuning.length; i++) {
                     let diff = Math.abs(frequency - currentTuning[i].freq);
@@ -374,21 +402,18 @@
                         closestIndex = i;
                     }
                 }
-                // Establish a fresh lock zone for this string
                 lockedTargetIndex = closestIndex;
             }
             
-            // Refresh our lock expiration timestamp on active tracking
             lockedTargetTime = now;
 
             let closest = currentTuning[closestIndex];
             let cents = 1200 * Math.log2(frequency / closest.freq);
             
-            // SMOOTHING BALANCER: If cents value jumps violently (>15 cents) over single frame, filter the impact
             if (lastCentsArray.length > 0) {
                 const prevCents = lastCentsArray[lastCentsArray.length - 1];
                 if (Math.abs(cents - prevCents) > 15) {
-                    cents = prevCents + (cents - prevCents) * 0.25; // Damps rapid snap actions
+                    cents = prevCents + (cents - prevCents) * 0.3; 
                 }
             }
 
@@ -406,19 +431,15 @@
         function renderTunerUI(frequency, cents, closestIndex, isSustaining) {
             let closest = currentTuning[closestIndex];
             
-            // EXPONENTIAL SCALE COMPENSATION: Softens needle physics when very close to 0 center mark
             const absCents = Math.abs(cents);
             let displayCents = cents;
-            if (absCents < 8) {
-                // Math flattening curve prevents the +5/-5 text/needle jump effect
-                displayCents = cents * 0.6; 
-            }
+            if (absCents < 8) { displayCents = cents * 0.6; }
 
             const boundedCents = Math.max(-50, Math.min(50, displayCents));
             const needlePosition = ((boundedCents + 50) / 100) * 100;
             const now = Date.now();
 
-            if (now - lastVisualUpdateTime > VISUAL_THROTTLE_MS || isSustaining) {
+            if (now - lastVisualUpdateTime > VISUAL_THROTTLE_MS || isSustaining || isDisplayFrozen) {
                 freqDisplay.innerText = frequency.toFixed(2) + ' Hz';
                 noteDisplay.innerText = closest.note.substring(0, 1);
                 
@@ -453,6 +474,7 @@
         }
 
         function clearDisplay() {
+            if (isDisplayFrozen) return; // Prevent clearing during active freeze frames
             resetLockState();
             lastValidPitch = null;
             lastFrequencies = [];
