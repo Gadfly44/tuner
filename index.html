@@ -187,7 +187,7 @@
         let stream = null;
         let scriptNode = null;
         let lowPassFilter = null;
-        let isFilterActive = false;
+        let isFilterActive = true;
 
         function buildReferenceUI() {
             referenceGrid.innerHTML = '';
@@ -288,6 +288,16 @@
         }
 
         function updateTuner(frequency) {
+            // Noise Gate: Ignore background hum frequencies completely
+            if (frequency < 65 || frequency > 350) {
+                noteDisplay.innerText = "-";
+                freqDisplay.innerText = "0.00 Hz";
+                needle.style.left = "50%";
+                centsReadout.innerText = "--";
+                statusRing.className = 'status-ring';
+                return;
+            }
+
             let closestIndex = 0;
             let minDiff = Math.abs(frequency - currentTuning[0].freq);
 
