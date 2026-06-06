@@ -253,9 +253,9 @@
         }
 
         function yinPitchDetection(buffer, sampleRate) {
-            const halfBufferSize = Math.floor(buffer.length / 2);
-            const threshold = 0.15;
-            let yinBuffer = new Float32Array(halfBufferSize);
+    const halfBufferSize = Math.floor(buffer.length / 2);
+    const threshold = 0.05; // <--- Set to 0.05 to reject background hum
+    let yinBuffer = new Float32Array(halfBufferSize);
 
             for (let tau = 0; tau < halfBufferSize; tau++) {
                 for (let i = 0; i < halfBufferSize; i++) {
