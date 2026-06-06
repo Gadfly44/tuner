@@ -221,13 +221,17 @@
             initAudio();
         });
 
-        async function initAudio() {
+       async function initAudio() {
             try {
                 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new AudioContextClass();
                 
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+                    audio: { 
+                        echoCancellation: false, 
+                        noiseSuppression: false, 
+                        autoGainControl: false 
+                    } 
                 });
                 const source = audioCtx.createMediaStreamSource(stream);
                 
@@ -235,7 +239,6 @@
                 lowPassFilter.type = 'highpass';
                 lowPassFilter.frequency.value = isFilterActive ? 50 : 10;
                 
-                // AUTO BUFFER FIX: Setting buffer to 0 forces the browser to native configuration size
                 scriptNode = audioCtx.createScriptProcessor(0, 1, 1);
                 
                 source.connect(lowPassFilter);
@@ -244,12 +247,43 @@
 
                 scriptNode.onaudioprocess = function(audioProcessingEvent) {
                     const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                    
+                    // --- THE VOLUME GATE CALCULATOR ---
+                    let sumSquares = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        sumSquares += inputData[i] * inputData[i];
+                    }
+                    const rmsVolume = Math.sqrt(sumSquares / inputData.length);
+                    
+                    // If the sound is quieter than a real guitar pluck, kill the process immediately
+                    // This keeps the screen perfectly dead-silent when you aren't playing
+                    if (rmsVolume < 0.015) {
+                        clearDisplay();
+                        return;
+                    }
+                    
                     const pitch = yinPitchDetection(inputData, audioCtx.sampleRate);
-                    if (pitch && pitch > 50 && pitch < 400) { updateTuner(pitch); }
+                    if (pitch && pitch > 65 && pitch < 380) { 
+                        updateTuner(pitch); 
+                    } else {
+                        clearDisplay();
+                    }
                 };
             } catch (err) {
                 alert('Tuner Error: ' + err);
             }
+        }
+
+        // Quick helper to clear out the screen values cleanly when silent
+        function clearDisplay() {
+            noteDisplay.innerText = "-";
+            noteDisplay.style.color = "var(--text-main)";
+            freqDisplay.innerText = "0.00 Hz";
+            needle.style.left = "50%";
+            needle.style.backgroundColor = "var(--text-main)";
+            centsReadout.innerText = "--";
+            centsReadout.style.color = "var(--text-muted)";
+            statusRing.className = 'status-ring';
         }
 
         function yinPitchDetection(buffer, sampleRate) {
